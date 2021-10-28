@@ -17,20 +17,6 @@ uint32_t CACHE::llc_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, c
     else {
         default_policy = false; // lru
     }
-    if(default_policy) {
-        set_dueling_counter = min(set_dueling_counter+1, (1<<10)-1);
-    }
-    else {
-        set_dueling_counter = max(set_dueling_counter-1, 0);
-    }
-
-    bool new_default_policy;
-    if(set_dueling_counter >= (1<<9)) {
-        new_default_policy = true; // bypass
-    }
-    else {
-        new_default_policy = false; // lru
-    }
 
     uint32_t way = 0;
     if(set < LLC_TRACKER_SET) {
@@ -51,7 +37,7 @@ uint32_t CACHE::llc_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, c
             // cache line is empty(found 1 invalid block)
             int loc1 = -1, loc2 = -1;
             for(int i = 0; i < PC_PREDICTOR_SIZE; i++) {
-                if(pc_predictor[i].policy == new_default_policy && pc_predictor[i].pc == ip) {
+                if(pc_predictor[i].policy == default_policy && pc_predictor[i].pc == ip) {
                     loc1 = i;
                     break;
                 }
@@ -66,7 +52,7 @@ uint32_t CACHE::llc_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, c
                 }
                 if(loc2 != -1) {
                     // pc predictor table has empty space
-                    pc_predictor[loc2].policy = new_default_policy;
+                    pc_predictor[loc2].policy = default_policy;
                     pc_predictor[loc2].pc = ip;
                     pc_predictor[loc2].counter = (1<<5) - 1; // 0111111111
                     pc_predictor[loc2].num_entries = 1;
@@ -75,6 +61,13 @@ uint32_t CACHE::llc_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, c
                     block[set][way].PC_pred_table_index = loc2;
                     block[set][way].reuse = false;
                     // we want to now fill that chache line with this missed cache so we return way
+                    if(way!=NUM_WAY) {
+                        set_dueling_counter = min(set_dueling_counter+1, (1<<10)-1); // done
+                    }
+                    else {
+                        set_dueling_counter = max(set_dueling_counter-1, 0);
+                    }
+
                     return way;
                 }
                 else {
@@ -82,6 +75,13 @@ uint32_t CACHE::llc_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, c
                     // so we just insert the cache line without creating any entry in predictor table
                     block[set][way].PC_pred_table_index = -1;
                     block[set][way].reuse = false;
+                    if(way!=NUM_WAY) {
+                        set_dueling_counter = min(set_dueling_counter+1, (1<<10)-1); // done
+                    }
+                    else {
+                        set_dueling_counter = max(set_dueling_counter-1, 0);
+                    }
+
                     return way;
                 }
             }
@@ -91,6 +91,12 @@ uint32_t CACHE::llc_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, c
                 // set the index and resuse bit in tracker set block
                 block[set][way].PC_pred_table_index = loc1;
                 block[set][way].reuse = false;
+                if(way!=NUM_WAY) {
+                    set_dueling_counter = min(set_dueling_counter+1, (1<<10)-1); // done
+                }
+                else {
+                    set_dueling_counter = max(set_dueling_counter-1, 0);
+                }
                 return way;
             }
 
@@ -99,7 +105,7 @@ uint32_t CACHE::llc_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, c
             // cache is full we need to evict something or bypass
             int loc1 = -1, loc2 = -1;
             for(int i = 0; i < PC_PREDICTOR_SIZE; i++) {
-                if(pc_predictor[i].policy == false && pc_predictor[i].pc == ip) {
+                if(pc_predictor[i].valid && pc_predictor[i].pc == ip) {
                     loc1 = i;
                     break;
                 }
@@ -114,7 +120,7 @@ uint32_t CACHE::llc_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, c
                 }
                 if(loc2 != -1) {
                     // predictor table has empty space
-                    pc_predictor[loc2].policy = new_default_policy;
+                    pc_predictor[loc2].policy = default_policy;
                     pc_predictor[loc2].pc = ip;
                     pc_predictor[loc2].counter = (1<<5) - 1; // 011111
                     pc_predictor[loc2].num_entries = 1;
@@ -125,31 +131,41 @@ uint32_t CACHE::llc_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, c
                     // make sure to decrement num entries of this evicted cache
                     if(block[set][way].PC_pred_table_index !=-1) {
                         pc_predictor[block[set][way].PC_pred_table_index].counter = min(pc_predictor[block[set][way].PC_pred_table_index].counter+1, (1<<6)-1);
-                        pc_predictor[block[set][way].PC_pred_table_index].num_entries -= 1;
-                        if(pc_predictor[block[set][way].PC_pred_table_index].num_entries <=0) {
+                        if(--(pc_predictor[block[set][way].PC_pred_table_index].num_entries) <=0) {
                             pc_predictor[block[set][way].PC_pred_table_index].valid = false;
                         }
                     }
                     block[set][way].PC_pred_table_index = loc2;
                     block[set][way].reuse = false;
                     // we want to now fill that chache line with this missed cache so we return way
+                    if(way!=NUM_WAY) {
+                        set_dueling_counter = min(set_dueling_counter+1, (1<<10)-1);
+                    }
+                    else {
+                        set_dueling_counter = max(set_dueling_counter-1, 0);
+                    }
                     return way;
                 }
                 else {
                     // predictor table has no empty space
                     // follow default policy
-                    if(new_default_policy) return NUM_WAY;
+                    if(default_policy) return NUM_WAY;
                     else {
                         way = lru_victim(cpu, instr_id, set, current_set, ip, full_addr, type);
                         if(block[set][way].PC_pred_table_index !=-1) {
                             pc_predictor[block[set][way].PC_pred_table_index].counter = min(pc_predictor[block[set][way].PC_pred_table_index].counter+1, (1<<6)-1);
-                            pc_predictor[block[set][way].PC_pred_table_index].num_entries -= 1;
-                            if(pc_predictor[block[set][way].PC_pred_table_index].num_entries <=0) {
+                            if(--(pc_predictor[block[set][way].PC_pred_table_index].num_entries) <=0) {
                                 pc_predictor[block[set][way].PC_pred_table_index].valid = false;
                             }
                         }
                         block[set][way].PC_pred_table_index = -1;
                         block[set][way].reuse = false;
+                        if(way!=NUM_WAY) {
+                            set_dueling_counter = min(set_dueling_counter+1, (1<<10)-1);
+                        }
+                        else {
+                            set_dueling_counter = max(set_dueling_counter-1, 0);
+                        }
                         return way;
                     }
                 }
@@ -157,15 +173,27 @@ uint32_t CACHE::llc_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, c
             else {
                 // entry corresponding to that pc found in pc predictor table
                 // we read the counter and get the policy
-                if(pc_predictor[loc1].counter >= 1<<5) {
+                if(pc_predictor[loc1].counter >= (1<<5)) {
                     // use lru policy now
                     pc_predictor[loc1].num_entries += 1;
                     way = lru_victim(cpu, instr_id, set, current_set, ip, full_addr, type);
+                    if(block[set][way].PC_pred_table_index !=-1) {
+                        pc_predictor[block[set][way].PC_pred_table_index].counter = min(pc_predictor[block[set][way].PC_pred_table_index].counter+1, (1<<6)-1);
+                        pc_predictor[block[set][way].PC_pred_table_index].num_entries -= 1;
+                        if(pc_predictor[block[set][way].PC_pred_table_index].num_entries <=0) {
+                            pc_predictor[block[set][way].PC_pred_table_index].valid = false;
+                        }
+                    }
+                    block[set][way].PC_pred_table_index = -1;
+                    block[set][way].reuse = false;
+                    set_dueling_counter = min(set_dueling_counter+1, (1<<10)-1);
                     return way;
                 }
                 else {
                     // bypass
-                    return NUM_WAY;
+                    way = NUM_WAY;
+                    set_dueling_counter = max(set_dueling_counter-1, 0);
+                    return way;
                 }
             }
         }
@@ -175,7 +203,7 @@ uint32_t CACHE::llc_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, c
         // we don't update the pc predictor table and just follow the default policy as decided by the tracker sets or the overriden policy when there is pc_predictor hit
         int loc1 = -1;
         for(int i = 0; i < PC_PREDICTOR_SIZE; i++) {
-            if(pc_predictor[i].policy == new_default_policy && pc_predictor[i].pc == ip) {
+            if(pc_predictor[i].policy == default_policy && pc_predictor[i].pc == ip) {
                 loc1 = i;
                 break;
             }
@@ -183,12 +211,12 @@ uint32_t CACHE::llc_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, c
         if(loc1 == -1) {
             // no entry corresponding to that pc in the pc predictor table
             // follow default policy as decided by set dueling
-            if(new_default_policy) return NUM_WAY;
+            if(default_policy) return NUM_WAY;
             else return lru_victim(cpu, instr_id, set, current_set, ip, full_addr, type);
         }
         else {
             // we found the entry in pc predictor
-            if(pc_predictor[loc1].counter >= 1<<5) {
+            if(pc_predictor[loc1].counter >= (1<<5)) {
                 // use lru policy now
                 return lru_victim(cpu, instr_id, set, current_set, ip, full_addr, type);
             }
